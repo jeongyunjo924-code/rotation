@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>도형 돌리기 시뮬레이션</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  #root { height: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useRef } = React;
+
+
+// ---------- 격자 설정 ----------
+const GRID_SIZE = 12; // 12 x 12 칸
+const CELL = 28; // 칸 하나 픽셀
+const PAD = 20;
+const SVG_SIZE = GRID_SIZE * CELL + PAD * 2;
+const CENTER = { x: GRID_SIZE / 2, y: GRID_SIZE / 2 }; // 격자 좌표 기준 회전 중심(칸 단위)
+
+// 격자 좌표(칸 단위) -> 픽셀 좌표
+const toPx = (pt) => ({ x: PAD + pt.x * CELL, y: PAD + pt.y * CELL });
+
+// ---------- 미리 정의된 도형 (격자 좌표, 중심이 CENTER 근처가 되도록 배치) ----------
+const PRESETS = {
+  "집 모양": [
+    { x: 4, y: 9 },
+    { x: 8, y: 9 },
+    { x: 8, y: 6 },
+    { x: 9, y: 6 },
+    { x: 7, y: 4 },
+    { x: 5, y: 4 },
+    { x: 3, y: 6 },
+    { x: 4, y: 6 },
+  ],
+  삼각형: [
+    { x: 4, y: 3 },
+    { x: 4, y: 9 },
+    { x: 9, y: 9 },
+  ],
+  화살표: [
+    { x: 6, y: 2 },
+    { x: 8, y: 5 },
+    { x: 7, y: 5 },
+    { x: 7, y: 9 },
+    { x: 5, y: 9 },
+    { x: 5, y: 5 },
+    { x: 4, y: 5 },
+  ],
+};
+
+const DIRECTIONS = [
+  { key: "cw", label: "시계 방향" },
+  { key: "ccw", label: "시계 반대 방향" },
+];
+const ANGLES = [90, 180, 270, 360];
+
+function RotationSimulator() {
+  const [shapeName, setShapeName] = useState("화살표");
+  const [customPoints, setCustomPoints] = useState([]);
+  const [drawingMode, setDrawingMode] = useState(false);
+  const [direction, setDirection] = useState("cw");
+  const [angle, setAngle] = useState(90);
+  const [displayAngle, setDisplayAngle] = useState(0); // 오른쪽 패널에 실제 적용된 회전각(부호 포함)
+  const [status, setStatus] = useState("도형을 고르고 '회전하기'를 눌러보세요.");
+  const [isAnimating, setIsAnimating] = useState(false);
+  const animRef = useRef(null);
+  const pauseRef = useRef(null);
+
+  const points =
+    shapeName === "직접 그리기" ? customPoints : PRESETS[shapeName];
+
+  const isDrawingUnfinished = shapeName === "직접 그리기" && drawingMode;
+  const hasShape = points && points.length >= 3 && !isDrawingUnfinished;
+
+  // SVG rotate()는 화면 기준 시계방향이 양수 각도
+  const targetSignedAngle = direction === "cw" ? angle : -angle;
+
+  const polygonStr = useMemo(() => {
+    if (!points) return "";
+    return points.map((p) => {
+      const px = toPx(p);
+      return `${px.x},${px.y}`;
+    }).join(" ");
+  }, [points]);
+
+  const centerPx = toPx(CENTER);
+
+  function handleGridClick(e) {
+    if (!drawingMode) return;
+    const svg = e.currentTarget;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const svgP = pt.matrixTransform(ctm.inverse());
+    // 가장 가까운 격자 교차점으로 스냅
+    const gx = Math.round((svgP.x - PAD) / CELL);
+    const gy = Math.round((svgP.y - PAD) / CELL);
+    if (gx < 0 || gx > GRID_SIZE || gy < 0 || gy > GRID_SIZE) return;
+    setCustomPoints((prev) => [...prev, { x: gx, y: gy }]);
+  }
+
+  // 한 구간(from → to, 최대 90도)을 부드럽게 애니메이션
+  function animateSegment(fromDeg, toDeg, duration, onDone) {
+    const start = performance.now();
+    function tick(now) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      setDisplayAngle(fromDeg + (toDeg - fromDeg) * eased);
+      if (t < 1) {
+        animRef.current = requestAnimationFrame(tick);
+      } else {
+        setDisplayAngle(toDeg);
+        onDone();
+      }
+    }
+    animRef.current = requestAnimationFrame(tick);
+  }
+
+  function startRotation() {
+    if (!hasShape || isAnimating) return;
+    setIsAnimating(true);
+    setDisplayAngle(0);
+
+    const dirLabel = direction === "cw" ? "시계 방향" : "시계 반대 방향";
+    const stepSize = direction === "cw" ? 90 : -90;
+    const totalSteps = angle / 90; // 90→1, 180→2, 270→3, 360→4
+    const segmentDuration = 650;
+    const pauseDuration = 130;
+
+    let current = 0;
+    let stepIndex = 0;
+
+    function doStep() {
+      stepIndex += 1;
+      setStatus(
+        `${dirLabel}으로 ${stepIndex * 90}° 회전 중... (${stepIndex}/${totalSteps}단계)`
+      );
+      const target = current + stepSize;
+      animateSegment(current, target, segmentDuration, () => {
+        current = target;
+        if (stepIndex < totalSteps) {
+          pauseRef.current = setTimeout(doStep, pauseDuration);
+        } else {
+          setIsAnimating(false);
+          if (angle === 360) {
+            setStatus("360° 회전! 제자리로 돌아왔어요. 처음 모습과 같아졌나요?");
+          } else {
+            setStatus(
+              `${dirLabel}으로 ${angle}° 회전했습니다. 어떤 부분이 바뀌었나요?`
+            );
+          }
+        }
+      });
+    }
+
+    doStep();
+  }
+
+  function reset() {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    if (pauseRef.current) clearTimeout(pauseRef.current);
+    setIsAnimating(false);
+    setDisplayAngle(0);
+    setStatus("도형을 고르고 '회전하기'를 눌러보세요.");
+  }
+
+  function selectShape(name) {
+    reset();
+    setShapeName(name);
+    setDrawingMode(name === "직접 그리기" && customPoints.length === 0);
+    if (name !== "직접 그리기") {
+      // keep custom points as-is for later
+    }
+  }
+
+  function startDrawing() {
+    reset();
+    setShapeName("직접 그리기");
+    setCustomPoints([]);
+    setDrawingMode(true);
+  }
+
+  function finishDrawing() {
+    if (customPoints.length >= 3) {
+      setDrawingMode(false);
+    }
+  }
+
+  function clearDrawing() {
+    setCustomPoints([]);
+    setDrawingMode(true);
+    reset();
+  }
+
+  // ---------- 격자 렌더링 ----------
+  function Grid() {
+    const lines = [];
+    for (let i = 0; i <= GRID_SIZE; i++) {
+      const p1 = toPx({ x: i, y: 0 });
+      const p2 = toPx({ x: i, y: GRID_SIZE });
+      lines.push(
+        <line
+          key={`v${i}`}
+          x1={p1.x}
+          y1={p1.y}
+          x2={p2.x}
+          y2={p2.y}
+          stroke="#E4DFD3"
+          strokeWidth={1}
+        />
+      );
+      const q1 = toPx({ x: 0, y: i });
+      const q2 = toPx({ x: GRID_SIZE, y: i });
+      lines.push(
+        <line
+          key={`h${i}`}
+          x1={q1.x}
+          y1={q1.y}
+          x2={q2.x}
+          y2={q2.y}
+          stroke="#E4DFD3"
+          strokeWidth={1}
+        />
+      );
+    }
+    return <g>{lines}</g>;
+  }
+
+  const headPointPx = points && points.length > 0 ? toPx(points[0]) : null;
+
+  return (
+    <div
+      style={{
+        fontFamily:
+          "'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif",
+        background: "#FBF7F0",
+        height: "100vh",
+        width: "100%",
+        padding: "clamp(8px, 1.5vh, 16px) clamp(10px, 2vw, 20px)",
+        boxSizing: "border-box",
+        color: "#2B2A28",
+        overflow: "hidden",
+        touchAction: "none",
+        WebkitTapHighlightColor: "transparent",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <style>{`
+        * { box-sizing: border-box; }
+        button {
+          touch-action: manipulation;
+          -webkit-tap-highlight-color: transparent;
+          user-select: none;
+        }
+        button:active {
+          transform: scale(0.96);
+        }
+      `}</style>
+      <div
+        style={{
+          maxWidth: "min(1100px, 100%)",
+          width: "100%",
+          margin: "0 auto",
+          height: "100%",
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <h1
+          className="rot-title"
+          style={{
+            fontSize: "clamp(16px, 2.4vh, 24px)",
+            fontWeight: 800,
+            margin: 0,
+            color: "#1F4B3F",
+            flexShrink: 0,
+          }}
+        >
+          도형 돌리기 시뮬레이션
+        </h1>
+        <p
+          className="rot-subtitle"
+          style={{
+            margin: "2px 0 8px",
+            color: "#6B6459",
+            fontSize: "clamp(11px, 1.4vh, 14px)",
+            flexShrink: 0,
+          }}
+        >
+          도형을 고르거나 직접 그린 뒤, 돌리기 전과 돌린 후의 모습을 비교해보세요.
+        </p>
+
+        {/* 도형 선택 영역 */}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginBottom: 8,
+            flexShrink: 0,
+          }}
+        >
+          {Object.keys(PRESETS).map((name) => (
+            <button
+              key={name}
+              onClick={() => selectShape(name)}
+              style={{
+                padding: "8px 14px",
+                minHeight: 36,
+                borderRadius: 999,
+                border:
+                  shapeName === name
+                    ? "2px solid #1F4B3F"
+                    : "2px solid #DDD5C4",
+                background: shapeName === name ? "#1F4B3F" : "#fff",
+                color: shapeName === name ? "#fff" : "#2B2A28",
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: "pointer",
+                touchAction: "manipulation",
+              }}
+            >
+              {name}
+            </button>
+          ))}
+          <button
+            onClick={startDrawing}
+            style={{
+              padding: "8px 14px",
+              minHeight: 36,
+              borderRadius: 999,
+              border:
+                shapeName === "직접 그리기"
+                  ? "2px solid #C1622D"
+                  : "2px solid #DDD5C4",
+              background: shapeName === "직접 그리기" ? "#C1622D" : "#fff",
+              color: shapeName === "직접 그리기" ? "#fff" : "#2B2A28",
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: "pointer",
+              touchAction: "manipulation",
+            }}
+          >
+            ✏️ 직접 그리기
+          </button>
+        </div>
+
+        {shapeName === "직접 그리기" && (
+          <div
+            style={{
+              marginBottom: 8,
+              padding: "6px 12px",
+              background: "#FFF3E9",
+              border: "1px solid #F0D3B8",
+              borderRadius: 10,
+              fontSize: 12,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: 6,
+              flexShrink: 0,
+            }}
+          >
+            <span>
+              {drawingMode
+                ? `왼쪽 모눈판의 점을 순서대로 클릭해 도형을 그려보세요. (현재 점 ${customPoints.length}개)`
+                : "도형이 완성되었습니다. 회전을 진행해보세요."}
+            </span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={finishDrawing}
+                disabled={!(drawingMode && customPoints.length >= 3)}
+                style={{
+                  ...btnStyle("#1F4B3F", "#fff"),
+                  padding: "6px 12px",
+                  minHeight: 32,
+                  fontSize: 12,
+                  opacity: customPoints.length >= 3 ? 1 : 0.4,
+                  cursor: customPoints.length >= 3 ? "pointer" : "not-allowed",
+                }}
+              >
+                도형 완성
+              </button>
+              <button
+                onClick={clearDrawing}
+                style={{
+                  ...btnStyle("#fff", "#2B2A28", "#DDD5C4"),
+                  padding: "6px 12px",
+                  minHeight: 32,
+                  fontSize: 12,
+                }}
+              >
+                다시 그리기
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 좌우 비교 패널 */}
+        <div
+          style={{
+            display: "flex",
+            gap: "clamp(8px, 2vw, 20px)",
+            justifyContent: "center",
+            alignItems: "center",
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+          }}
+        >
+          <Panel
+            title="돌리기 전"
+            accent="#1F4B3F"
+            onClick={shapeName === "직접 그리기" ? handleGridClick : undefined}
+          >
+            <Grid />
+            {shapeName !== "삼각형" && <CenterMark />}
+            {hasShape && shapeName !== "삼각형" && <RotationArrow color="#1F4B3F" />}
+            {hasShape && (
+              shapeName === "집 모양" ? (
+                <HouseShapeSVG headPx={headPointPx} />
+              ) : shapeName === "삼각형" ? (
+                <TriangleShapeSVG headPx={headPointPx} />
+              ) : (
+                <ShapeSVG polygonStr={polygonStr} headPx={headPointPx} fill="#1F4B3F55" stroke="#1F4B3F" />
+              )
+            )}
+            {shapeName === "직접 그리기" &&
+              customPoints.map((p, i) => {
+                const px = toPx(p);
+                return (
+                  <circle
+                    key={i}
+                    cx={px.x}
+                    cy={px.y}
+                    r={5}
+                    fill="#C1622D"
+                    stroke="#fff"
+                    strokeWidth={1.5}
+                  />
+                );
+              })}
+          </Panel>
+
+          <Panel title="돌린 후" accent="#C1622D">
+            <Grid />
+            {shapeName !== "삼각형" && <CenterMark />}
+            {hasShape && <RotationArrow color="#C1622D" dashed />}
+            {hasShape && <AngleArc color="#F2984B" />}
+            {hasShape && (
+              <g
+                style={{
+                  transform: `rotate(${displayAngle}deg)`,
+                  transformOrigin: `${centerPx.x}px ${centerPx.y}px`,
+                }}
+              >
+                {shapeName !== "삼각형" && <RotationArrow color="#C1622D" />}
+                {shapeName === "집 모양" ? (
+                  <HouseShapeSVG headPx={headPointPx} />
+                ) : shapeName === "삼각형" ? (
+                  <TriangleShapeSVG headPx={headPointPx} />
+                ) : (
+                  <ShapeSVG polygonStr={polygonStr} headPx={headPointPx} fill="#C1622D55" stroke="#C1622D" />
+                )}
+              </g>
+            )}
+          </Panel>
+        </div>
+
+        {/* 조작 컨트롤 */}
+        <div
+          style={{
+            marginTop: 8,
+            flexShrink: 0,
+            background: "#fff",
+            border: "1px solid #EBE4D6",
+            borderRadius: 12,
+            padding: 10,
+          }}
+        >
+          <ControlRow label="방향">
+            {DIRECTIONS.map((d) => (
+              <button
+                key={d.key}
+                onClick={() => setDirection(d.key)}
+                style={{
+                  ...btnStyle(
+                    direction === d.key ? "#1F4B3F" : "#fff",
+                    direction === d.key ? "#fff" : "#2B2A28",
+                    "#DDD5C4"
+                  ),
+                  minWidth: 110,
+                }}
+              >
+                {d.key === "cw" ? "↻ " : "↺ "}
+                {d.label}
+              </button>
+            ))}
+          </ControlRow>
+
+          <ControlRow label="각도">
+            {ANGLES.map((a) => (
+              <button
+                key={a}
+                onClick={() => setAngle(a)}
+                style={{
+                  ...btnStyle(
+                    angle === a ? "#C1622D" : "#fff",
+                    angle === a ? "#fff" : "#2B2A28",
+                    "#DDD5C4"
+                  ),
+                  minWidth: 56,
+                }}
+              >
+                {a}°
+              </button>
+            ))}
+          </ControlRow>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+            <button
+              onClick={startRotation}
+              disabled={!hasShape || isAnimating || drawingMode}
+              style={{
+                ...btnStyle("#1F4B3F", "#fff"),
+                flex: 1,
+                fontSize: 15,
+                padding: "9px 0",
+                opacity: !hasShape || isAnimating || drawingMode ? 0.5 : 1,
+                cursor:
+                  !hasShape || isAnimating || drawingMode
+                    ? "not-allowed"
+                    : "pointer",
+              }}
+            >
+              회전하기
+            </button>
+            <button
+              onClick={reset}
+              style={{
+                ...btnStyle("#fff", "#2B2A28", "#DDD5C4"),
+                padding: "9px 18px",
+              }}
+            >
+              초기화
+            </button>
+          </div>
+        </div>
+
+        {/* 상태 안내 */}
+        <div
+          style={{
+            marginTop: 6,
+            marginBottom: 0,
+            flexShrink: 0,
+            padding: "8px 14px",
+            background: "#F0F5F2",
+            border: "1px solid #D7E5DE",
+            borderRadius: 10,
+            fontSize: "clamp(12px, 1.6vh, 14px)",
+            fontWeight: 600,
+            color: "#1F4B3F",
+            textAlign: "center",
+          }}
+        >
+          {status}
+        </div>
+      </div>
+    </div>
+  );
+
+  function btnStyle(bg, color, borderColor) {
+    return {
+      padding: "9px 14px",
+      minHeight: 38,
+      borderRadius: 10,
+      border: `2px solid ${borderColor || bg}`,
+      background: bg,
+      color,
+      fontWeight: 700,
+      fontSize: 13,
+      cursor: "pointer",
+      touchAction: "manipulation",
+      WebkitTapHighlightColor: "transparent",
+    };
+  }
+
+  function ControlRow({ label, children }) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+          marginBottom: 6,
+        }}
+      >
+        <span style={{ width: 40, fontWeight: 700, color: "#6B6459", fontSize: 13 }}>
+          {label}
+        </span>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{children}</div>
+      </div>
+    );
+  }
+
+  function Panel({ title, accent, children, onClick }) {
+    return (
+      <div
+        style={{
+          flex: "1 1 0",
+          minWidth: 0,
+          height: "100%",
+          maxWidth: 480,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+        }}
+      >
+        <div
+          style={{
+            fontWeight: 800,
+            fontSize: "clamp(12px, 1.8vh, 15px)",
+            color: accent,
+            marginBottom: 2,
+            flexShrink: 0,
+            textAlign: "center",
+          }}
+        >
+          {title}
+        </div>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <svg
+            viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}
+            style={{
+              background: "#fff",
+              border: `2px solid ${accent}33`,
+              borderRadius: 12,
+              display: "block",
+              height: "100%",
+              width: "auto",
+              maxWidth: "100%",
+              maxHeight: "100%",
+              aspectRatio: "1 / 1",
+              touchAction: onClick ? "none" : "manipulation",
+              cursor: onClick ? "crosshair" : "default",
+            }}
+            onClick={onClick}
+          >
+            {children}
+          </svg>
+        </div>
+      </div>
+    );
+  }
+
+  function AngleArc({ color }) {
+    const a = displayAngle;
+    if (Math.abs(a) < 3 || Math.abs(a) >= 358) return null; // 시작 직후/거의 360도는 생략
+
+    const r = 26;
+    const thetaRad = (a * Math.PI) / 180;
+    const sx = centerPx.x;
+    const sy = centerPx.y - r;
+    const ex = centerPx.x + r * Math.sin(thetaRad);
+    const ey = centerPx.y - r * Math.cos(thetaRad);
+    const largeArcFlag = Math.abs(a) > 180 ? 1 : 0;
+    const sweepFlag = a >= 0 ? 1 : 0;
+
+    // 화살표 머리가 향할 접선 방향 계산
+    const dirSign = direction === "cw" ? 1 : -1;
+    const tx = dirSign * Math.cos(thetaRad);
+    const ty = dirSign * Math.sin(thetaRad);
+    const tangentDeg = (Math.atan2(ty, tx) * 180) / Math.PI;
+
+    return (
+      <g>
+        <path
+          d={`M ${sx} ${sy} A ${r} ${r} 0 ${largeArcFlag} ${sweepFlag} ${ex} ${ey}`}
+          fill="none"
+          stroke={color}
+          strokeWidth={3}
+          strokeLinecap="round"
+        />
+        <g transform={`translate(${ex}, ${ey}) rotate(${tangentDeg})`}>
+          <polygon points="0,-7 14,0 0,7" fill={color} />
+        </g>
+      </g>
+    );
+  }
+
+  function RotationArrow({ color, dashed }) {
+    const length = dashed ? 34 : 55;
+    const tipY = centerPx.y - length;
+    return (
+      <g opacity={dashed ? 0.45 : 1}>
+        <line
+          x1={centerPx.x}
+          y1={centerPx.y}
+          x2={centerPx.x}
+          y2={tipY + 10}
+          stroke={color}
+          strokeWidth={dashed ? 1.5 : 3}
+          strokeDasharray={dashed ? "5 4" : undefined}
+        />
+        {!dashed && (
+          <polygon
+            points={`${centerPx.x - 6},${tipY + 12} ${centerPx.x + 6},${tipY + 12} ${centerPx.x},${tipY - 2}`}
+            fill={color}
+          />
+        )}
+      </g>
+    );
+  }
+
+  function CenterMark() {
+    return (
+      <g>
+        <circle cx={centerPx.x} cy={centerPx.y} r={4} fill="#C1622D" />
+        <circle
+          cx={centerPx.x}
+          cy={centerPx.y}
+          r={8}
+          fill="none"
+          stroke="#C1622D"
+          strokeWidth={1.5}
+        />
+      </g>
+    );
+  }
+
+  function TriangleShapeSVG({ headPx }) {
+    const pts = points.map((p) => toPx(p)).map((p) => `${p.x},${p.y}`).join(" ");
+    return (
+      <g>
+        <polygon
+          points={pts}
+          fill="none"
+          stroke="#8BC34A"
+          strokeWidth={4}
+          strokeLinejoin="round"
+        />
+        {headPx && (
+          <circle cx={headPx.x} cy={headPx.y} r={6} fill="#F2B84B" stroke="#fff" strokeWidth={1.5} />
+        )}
+      </g>
+    );
+  }
+
+  function HouseShapeSVG({ headPx }) {
+    const bodyIdx = [0, 1, 2, 7];
+    const roofIdx = [6, 3, 4, 5];
+    const toPts = (idxs) =>
+      idxs.map((i) => toPx(points[i])).map((p) => `${p.x},${p.y}`).join(" ");
+    return (
+      <g>
+        <polygon
+          points={toPts(bodyIdx)}
+          fill="#FFD666"
+          stroke="#D9A32B"
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+        />
+        <polygon
+          points={toPts(roofIdx)}
+          fill="#6FD8F5"
+          stroke="#2AA9CE"
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+        />
+        {headPx && (
+          <circle cx={headPx.x} cy={headPx.y} r={6} fill="#F2B84B" stroke="#fff" strokeWidth={1.5} />
+        )}
+      </g>
+    );
+  }
+
+  function ShapeSVG({ polygonStr, headPx, fill, stroke }) {
+    return (
+      <g>
+        <polygon
+          points={polygonStr}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+        />
+        {headPx && (
+          <circle cx={headPx.x} cy={headPx.y} r={6} fill="#F2B84B" stroke="#fff" strokeWidth={1.5} />
+        )}
+      </g>
+    );
+  }
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<RotationSimulator />);
+</script>
+</body>
+</html>
