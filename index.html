@@ -354,7 +354,8 @@
     svgL.textContent = '';
     svgR.textContent = '';
     var has = hasShape();
-    var isTri = state.shapeName === TRI;
+    // 삼각형·직접 그리기에서는 중앙점과 실선 화살표를 숨김 (각도 호와 점선 기준선은 유지)
+    var isTri = state.shapeName === TRI || state.shapeName === DRAW;
 
     // 돌리기 전 (왼쪽)
     drawGrid(svgL);
