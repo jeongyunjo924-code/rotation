@@ -237,15 +237,25 @@
   })();
 
   // ---------- 격자 설정 ----------
-  var GRID_SIZE = 12;               // 12 x 12 칸
-  var CELL = 28;                    // 칸 하나(viewBox 단위)
+  var PRESET_GRID = 12;             // 기본 도형: 12 x 12 칸
+  var DRAW_GRID = 5;                // 직접 그리기: 활동지와 같은 5 x 5 칸
   var PAD = 20;
-  var SVG_SIZE = GRID_SIZE * CELL + PAD * 2;
-  var CENTER = { x: GRID_SIZE / 2, y: GRID_SIZE / 2 };   // 회전 중심(칸 단위)
+  var SVG_SIZE = PRESET_GRID * 28 + PAD * 2;   // 격자판 크기는 항상 같게 유지
+  var GRID_SIZE = PRESET_GRID;
+  var CELL = 28;                    // 칸 하나(viewBox 단위), 격자 칸 수에 따라 바뀜
+  var CENTER = { x: GRID_SIZE / 2, y: GRID_SIZE / 2 };   // 회전 중심(칸 단위) = 모눈판 가운데
   var NS = 'http://www.w3.org/2000/svg';
 
   function toPx(p) { return { x: PAD + p.x * CELL, y: PAD + p.y * CELL }; }
   var centerPx = toPx(CENTER);
+
+  // 지금 고른 도형에 맞춰 격자 칸 수·칸 크기·회전 중심을 정함
+  function applyGrid() {
+    GRID_SIZE = state.shapeName === DRAW ? DRAW_GRID : PRESET_GRID;
+    CELL = (SVG_SIZE - PAD * 2) / GRID_SIZE;
+    CENTER = { x: GRID_SIZE / 2, y: GRID_SIZE / 2 };
+    centerPx = toPx(CENTER);
+  }
 
   // ---------- 기본 도형 (격자 좌표) ----------
   var PRESETS = {
@@ -496,6 +506,7 @@
   function renderStatus() { statusEl.textContent = state.status; }
 
   function render() {
+    applyGrid();
     renderShapeButtons();
     renderDrawBar();
     renderPanels();
